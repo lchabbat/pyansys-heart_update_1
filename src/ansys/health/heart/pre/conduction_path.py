@@ -33,7 +33,7 @@ import pyvista as pv
 
 from ansys.health.heart import LOG as LOGGER
 from ansys.health.heart.objects import Mesh, SurfaceMesh
-from ansys.health.heart.settings.material.ep_material import EPMaterialModel, Insulator
+from ansys.health.heart.settings.material.ep_material import EPMaterial
 
 
 class ConductionPathType(Enum):
@@ -66,6 +66,16 @@ class ConductionPathType(Enum):
     """Left anterior fascicle."""
     LEFT_POSTERIOR_FASCICLE = "Left posterior fascicle"
     """Left posterior fascicle."""
+    RIGHT_FREE_WALL_FASCICLE = "Right free wall fascicle" #
+    """Right free wall fascicle"""
+    LEFT_BONUS_FASCICLE = "Left bonus fascicle" #
+    """Left bonus fascicle"""
+    LEFT_SEPTUM_PURKINJE = "Left-septum-purkinje"
+    """Left Purkinje network."""
+    LAF_PURKINJE = "LAF-purkinje"
+    """LAF Purkinje network."""
+    LPF_PURKINJE = "LPF-purkinje"
+    """LPF Purkinje network."""
     USER_PAHT_1 = "User path 1"
     """User path 1."""
     USER_PAHT_2 = "User path 2"
@@ -84,7 +94,7 @@ class ConductionPath:
         id: int,
         is_connected: np.ndarray,
         relying_surface: pv.PolyData,
-        material: EPMaterialModel | Insulator | None = None,
+        material: EPMaterial = EPMaterial.DummyMaterial(),
         up_path: ConductionPath | None = None,
         down_path: ConductionPath | None = None,
     ):
@@ -103,7 +113,7 @@ class ConductionPath:
             Mask array of points connected to the solid mesh.
         relying_surface : pv.PolyData
             Surface mesh that the conduction path relies on.
-        material : EPMaterial, default: None
+        material : EPMaterial, default: EPMaterial.DummyMaterial()
             EP Material property.
         up_path : ConductionPath | None, default: None
             Upstream conduction path. Its closest point connects to the first point of this path.

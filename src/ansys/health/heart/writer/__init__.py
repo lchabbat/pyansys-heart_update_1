@@ -27,6 +27,7 @@ from .ep_writer import (
     ElectrophysiologyBeamsDynaWriter,
     ElectrophysiologyDynaWriter,
     PurkinjeGenerationDynaWriter,
+    PurkinjeGenerationDynaWriter2,
 )
 from .laplace_writer import LaplaceWriter
 from .mechanics_writer import MechanicsDynaWriter, ZeroPressureMechanicsDynaWriter

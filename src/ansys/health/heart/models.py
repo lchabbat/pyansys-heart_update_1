@@ -54,7 +54,7 @@ from ansys.health.heart.pre.conduction_path import (
 )
 from ansys.health.heart.pre.input import _InputModel
 import ansys.health.heart.pre.mesher as mesher
-import ansys.health.heart.settings.material.ep_material as ep_materials
+from ansys.health.heart.settings.material.ep_material import EPMaterial
 from ansys.health.heart.settings.material.material import (
     ISO,
     Mat295,
@@ -1315,6 +1315,9 @@ class HeartModel:
                 if "septum" in surface.name.lower() and "right ventricle" in surface.name.lower():
                     try:
                         septum_candidates = [s for s in self.mesh.surface_names if "septum" in s]
+                        print('___________________________________')
+                        print(septum_candidates)
+                        print('___________________________________')
                         if len(septum_candidates) > 1:
                             LOGGER.warning(
                                 "Multiple candidate surfaces for septum exist. Using the first one."
@@ -1573,12 +1576,14 @@ class HeartModel:
             self.l2cv_axis = self.l4cv_axis = self.short_axis = {}
             return
 
-        mv_center = next(
-            cap.centroid for cap in left_ventricle.caps if cap.type == CapType.MITRAL_VALVE
-        )
-        av_center = next(
-            cap.centroid for cap in left_ventricle.caps if cap.type == CapType.AORTIC_VALVE
-        )
+        # mv_center = next(
+        #     cap.centroid for cap in left_ventricle.caps if cap.type == CapType.MITRAL_VALVE
+        # )
+        # av_center = next(
+        #     cap.centroid for cap in left_ventricle.caps if cap.type == CapType.AORTIC_VALVE
+        # )
+        mv_center = [42.0409, -182.66, -461.1]
+        av_center = [22.541266, -200.37433, -452.9]
         apex = next(ap.xyz for ap in left_ventricle.apex_points if ap.name == "apex epicardium")
 
         l4cv, l2cv, short = compute_anatomy_axis(
@@ -1689,7 +1694,7 @@ class HeartModel:
         part.active = False
         part.meca_material = stiff_material
         # assign default EP material as for ventricles
-        part.ep_material = ep_materials.Active()
+        part.ep_material = EPMaterial.Active()
 
         return part
 
@@ -1830,7 +1835,7 @@ class FourChamber(HeartModel):
         # Assign a new part ID to the isolation part
         isolation.fiber = True
         isolation.active = False
-        isolation.ep_material = ep_materials.Insulator()
+        isolation.ep_material = EPMaterial.Insulator()
 
         return isolation
 
@@ -1891,7 +1896,7 @@ class FourChamber(HeartModel):
         ring.fiber = False
         ring.active = False
         # assign default EP material
-        ring.ep_material = ep_materials.Active()
+        ring.ep_material = EPMaterial.Active()
 
         return ring
 
@@ -1932,7 +1937,7 @@ class FullHeart(FourChamber):
         self.pulmonary_artery.fiber = False
         self.pulmonary_artery.active = False
 
-        self.aorta.ep_material = ep_materials.Insulator()
-        self.pulmonary_artery.ep_material = ep_materials.Insulator()
+        self.aorta.ep_material = EPMaterial.Insulator()
+        self.pulmonary_artery.ep_material = EPMaterial.Insulator()
 
         super().__init__(working_directory=working_directory)

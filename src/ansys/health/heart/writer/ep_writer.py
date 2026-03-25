@@ -32,8 +32,7 @@ from ansys.dyna.core.keywords import keywords
 from ansys.health.heart import LOG as LOGGER
 from ansys.health.heart.models import BiVentricle, FourChamber, FullHeart, HeartModel, LeftVentricle
 from ansys.health.heart.pre.conduction_path import ConductionPathType
-import ansys.health.heart.settings.material.cell_models as cell_models
-import ansys.health.heart.settings.material.ep_material as ep_materials
+from ansys.health.heart.settings.material.ep_material import CellModel, EPMaterial, cell_models
 import ansys.health.heart.settings.settings as sett
 from ansys.health.heart.settings.settings import SimulationSettings, Stimulation
 from ansys.health.heart.writer import custom_keywords as custom_keywords
@@ -313,6 +312,251 @@ class PurkinjeGenerationDynaWriter(BaseDynaWriter):
         return
 
 
+class PurkinjeGenerationDynaWriter2(BaseDynaWriter):
+    """Class for preparing the input for a Purkinje LS-DYNA simulation."""
+
+    def __init__(
+        self,
+        model: HeartModel,
+        settings: SimulationSettings = None,
+    ) -> None:
+        super().__init__(model=model, settings=settings)
+        self.kw_database = PurkinjeGenerationDecks()
+        """Collection of keywords relevant for Purkinje generation."""
+
+        if sett.Purkinje not in self._get_subsettings():
+            raise ValueError("Expecting Purkinje settings.")
+
+    def update(self) -> None:
+        """Update keyword database.
+
+        This method overwrites the inherited function.
+        """
+        ##
+        self._update_main_db()  # needs updating
+
+        self._update_node_db()  # can stay the same (could move to base class)
+        if isinstance(self.model, (FourChamber, FullHeart)):
+            LOGGER.warning(
+                "Atrium are present in the model. "
+                "These are removed for ventricle Purkinje generation."
+            )
+            self._keep_ventricles()
+
+        self._update_parts_db()  # can stay the same (could move to base class++++++++++++++++++++)
+        self._update_solid_elements_db(add_fibers=False)
+        self._update_material_db()
+
+        self._update_segmentsets_db(add_cavities=False)  # can stay the same
+        self._update_nodesets_db()  # can stay the same
+
+        # update ep settings
+        self._update_ep_settings()
+        self._update_create_Purkinje()
+
+        include_files = self._get_decknames_of_include()
+        self.include_to_main(include_files)
+
+        return
+
+    def _update_material_db(self) -> None:
+        """Add simple linear elastic material for each defined part."""
+        material_settings = self.settings.electrophysiology.material
+        for part in self.model.parts:
+            em_mat_id = part.pid
+            self.kw_database.material.extend(
+                [
+                    keywords.MatElastic(mid=em_mat_id, ro=1e-6, e=1),
+                    custom_keywords.EmMat003(
+                        mid=em_mat_id,
+                        mtype=2,
+                        sigma11=material_settings.myocardium["sigma_fiber"].m,
+                        sigma22=material_settings.myocardium["sigma_sheet"].m,
+                        sigma33=material_settings.myocardium["sigma_sheet_normal"].m,
+                        beta=material_settings.myocardium["beta"].m,
+                        cm=material_settings.myocardium["cm"].m,
+                        aopt=2.0,
+                        a1=0,
+                        a2=0,
+                        a3=1,
+                        d1=0,
+                        d2=-1,
+                        d3=0,
+                    ),
+                ]
+            )
+
+    def _update_ep_settings(self) -> None:
+        """Add the settings for the electrophysiology solver."""
+        self.kw_database.ep_settings.append(
+            keywords.EmControl(
+                emsol=11, numls=4, macrodt=1, dimtype=None, nperio=None, ncylbem=None
+            )
+        )
+
+        self.kw_database.ep_settings.append(keywords.EmOutput(mats=1, matf=1, sols=1, solf=1))
+
+        return
+
+    def _update_create_Purkinje(self) -> None:
+        """Update the keywords for Purkinje generation (multi-origins support)."""
+
+        def create_network(coords, ssid, pid, purkid, inodeid, iedgeid, ventricle_side, name="unnamed"):
+            LOGGER.info(
+                f"Ajout d’un réseau Purkinje ({name}) dans le {ventricle_side} (purkid={purkid})"
+            )
+            self.kw_database.main.append(
+                custom_keywords.EmEpPurkinjeNetwork2(
+                    purkid=purkid,
+                    buildnet=1,
+                    ssid=ssid,
+                    mid=pid,
+                    pointstx=coords[0],
+                    pointsty=coords[1],
+                    pointstz=coords[2],
+                    edgelen=self.settings.purkinje.edgelen.m,
+                    ngen=set_ngen,
+                    nbrinit=self.settings.purkinje.nbrinit.m,
+                    nsplit=self.settings.purkinje.nsplit.m,
+                    inodeid=inodeid,
+                    iedgeid=iedgeid,
+                    pmjtype=self.settings.purkinje.pmjtype.m,
+                    pmjradius=self.settings.purkinje.pmjradius.m,
+                    pmjrestype=self.settings.electrophysiology.material.beam["pmjrestype"].m,
+                    pmjres=self.settings.electrophysiology.material.beam["pmjres"].m,
+                )
+            )
+
+        # ==========================================================
+        # VENTRICULE GAUCHE
+        # ==========================================================
+        if isinstance(self.model, (LeftVentricle, BiVentricle, FourChamber, FullHeart)):
+
+            # origine par défaut = apex gauche
+            if self.settings.purkinje.node_id_origin_left is None:
+                node_origin_left = self.model.left_ventricle.apex_points[0].node_id
+            else:
+                node_origin_left = self.settings.purkinje.node_id_origin_left
+                
+                
+            segment_set_ids_endo_left = self.model.left_ventricle.endocardium._seg_set_id
+            endocardium = self.model.mesh.get_surface(self.model.left_ventricle.endocardium.id)
+
+            # Vérifie que le nœud n’est pas au bord
+            if np.any(
+                endocardium.point_data["_global-point-ids"][endocardium.boundary_edges] == node_origin_left
+            ):
+                element_id = np.argwhere(
+                    np.any(endocardium.triangles_global == node_origin_left, axis=1)
+                )[0][0]
+                node_origin_left = endocardium.triangles_global[element_id, :][
+                    np.argwhere(
+                        np.isin(
+                            endocardium.triangles_global[element_id, :],
+                            endocardium.point_data["_global-point-ids"][endocardium.boundary_edges],
+                            invert=True,
+                        )
+                    )[0][0]
+                ]
+                LOGGER.debug(
+                    f"Node {self.model.left_ventricle.apex_points[0].node_id} était sur un bord. Remplacé par {node_origin_left}"
+                )
+                self.model.left_ventricle.apex_points[0].node_id = node_origin_left
+
+            # Crée un node_set pour l’apex gauche
+            node_set_id_apex_left = self.get_unique_nodeset_id()
+            node_set_apex_kw = create_node_set_keyword(
+                node_ids=[node_origin_left + 1],
+                node_set_id=node_set_id_apex_left,
+                title="apex node left",
+            )
+            self.kw_database.node_sets.append(node_set_apex_kw)
+
+            # Coordonnées par défaut
+            default_coords_left = self.model.mesh.points[node_origin_left, :]
+
+            # Liste d’origines : paramètre utilisateur ou défaut
+            origins_left = getattr(self.settings.purkinje, "origins_left", None)
+            if origins_left is [] or origins_left is None:
+                origins_left = [{"name": "apex_left", "coords": default_coords_left}]
+                set_ngen = self.settings.purkinje.ngen.m  # valeur par défaut
+            else:
+                unit_registry = self.settings.purkinje.pmjtype._REGISTRY
+                set_ngen = 100 * unit_registry.dimensionless  
+
+            node_id_start_left = self.model.mesh.points.shape[0] + 1
+            edge_id_start_left = self.model.mesh.tetrahedrons.shape[0] + 1
+
+            for i, origin in enumerate(origins_left, start=1):
+                coords = np.array(origin["coords"])
+                name = origin.get("name", f"left_origin_{i}")
+                pid = self.get_unique_part_id()
+                inodeid = node_id_start_left + 1000 * i
+                iedgeid = edge_id_start_left + 1000 * i
+                purkid = 10 + i
+                create_network(coords, segment_set_ids_endo_left, pid, purkid, inodeid, iedgeid, "gauche", name)
+
+        # ==========================================================
+        # VENTRICULE DROIT
+        # ==========================================================
+        if isinstance(self.model, (BiVentricle, FourChamber, FullHeart)):
+            set_ngen = self.settings.purkinje.ngen.m  # valeur par défaut
+
+            if self.settings.purkinje.node_id_origin_right is None:
+                node_origin_right = self.model.right_ventricle.apex_points[0].node_id
+            else:
+                node_origin_right = self.settings.purkinje.node_id_origin_right
+
+            segment_set_ids_endo_right = self.model.right_ventricle.endocardium._seg_set_id
+            endocardium = self.model.mesh.get_surface(self.model.right_ventricle.endocardium.id)
+
+            if np.any(endocardium.boundary_edges_global == node_origin_right):
+                element_id = np.argwhere(
+                    np.any(endocardium.triangles_global == node_origin_right, axis=1)
+                )[0][0]
+                node_origin_right = endocardium.triangles_global[element_id, :][
+                    np.argwhere(
+                        np.isin(
+                            endocardium.triangles_global[element_id, :],
+                            endocardium.boundary_edges_global,
+                            invert=True,
+                        )
+                    )[0][0]
+                ]
+                LOGGER.debug(
+                    f"Node {self.model.right_ventricle.apex_points[0].node_id} était sur un bord. Remplacé par {node_origin_right}"
+                )
+                self.model.right_ventricle.apex_points[0].node_id = node_origin_right
+
+            node_set_id_apex_right = self.get_unique_nodeset_id()
+            node_set_apex_kw = create_node_set_keyword(
+                node_ids=[node_origin_right + 1],
+                node_set_id=node_set_id_apex_right,
+                title="apex node right",
+            )
+            self.kw_database.node_sets.append(node_set_apex_kw)
+
+            default_coords_right = self.model.mesh.points[node_origin_right, :]
+            origins_right = getattr(self.settings.purkinje, "origins_right", None)
+            if origins_right is [] or origins_right is None:
+                origins_right = [{"name": "apex_right", "coords": default_coords_right}]
+
+
+            node_id_start_right = 2 * self.model.mesh.points.shape[0]
+            edge_id_start_right = 2 * self.model.mesh.tetrahedrons.shape[0]
+
+            for j, origin in enumerate(origins_right, start=1):
+                coords = np.array(origin["coords"])
+                name = origin.get("name", f"right_origin_{j}")
+                pid = self.get_unique_part_id()
+                inodeid = node_id_start_right + 1000 * j
+                iedgeid = edge_id_start_right + 1000 * j
+                purkid = 20 + j
+                create_network(coords, segment_set_ids_endo_right, pid, purkid, inodeid, iedgeid, "droit", name)
+
+    def _update_main_db(self) -> None:
+        return
+
 class ElectrophysiologyDynaWriter(BaseDynaWriter):
     """Class for preparing the input for an electrophysiology LS-DYNA simulation."""
 
@@ -355,7 +599,7 @@ class ElectrophysiologyDynaWriter(BaseDynaWriter):
         # For now, new nodesets should be created after calling
         # self._update_nodesets_db()
         self._update_nodesets_db()
-        self._update_parts_cellmodels()
+        self._update_parts_cellmodels4()
 
         if self.model.conduction_mesh.number_of_cells != 0:
             # with smcoupl=1, mechanical coupling is disabled
@@ -402,17 +646,12 @@ class ElectrophysiologyDynaWriter(BaseDynaWriter):
             sig3 = material_settings.myocardium["velocity_sheet_normal"].m
 
         for part in self.model.parts:
-            if (
-                not isinstance(
-                    part.ep_material, (ep_materials.EPMaterialModel, ep_materials.Insulator)
-                )
-                or part.ep_material is None
-            ):
+            if isinstance(part.ep_material, EPMaterial.DummyMaterial):
                 LOGGER.info(f"Material of {part.name} is assigned automatically.")
                 if part.active:
-                    part.ep_material = ep_materials.Active(sigma_fiber=sig1)
+                    part.ep_material = EPMaterial.Active(sigma_fiber=sig1)
                 else:
-                    part.ep_material = ep_materials.Passive(sigma_fiber=sig1)
+                    part.ep_material = EPMaterial.Passive(sigma_fiber=sig1)
                 if part.fiber:
                     part.ep_material.sigma_sheet = sig2
                     part.ep_material.sigma_sheet_normal = sig3
@@ -427,7 +666,7 @@ class ElectrophysiologyDynaWriter(BaseDynaWriter):
     def _update_parts_cellmodels(self) -> None:
         """Add cell model for each defined part."""
         for part in self.model.parts:
-            if type(part.ep_material) is ep_materials.Active:
+            if isinstance(part.ep_material, EPMaterial.Active):
                 ep_mid = part.pid
                 # One cell model for myocardium, default value is epi layer parameters
                 self._add_cell_model_keyword(matid=ep_mid, cellmodel=part.ep_material.cell_model)
@@ -440,13 +679,13 @@ class ElectrophysiologyDynaWriter(BaseDynaWriter):
                 mid_id,
                 epi_id,
             ) = self._create_myocardial_nodeset_layers()
-            tentusscher_endo = cell_models.TentusscherEndo()
-            tentusscher_mid = cell_models.TentusscherMid()
-            tentusscher_epi = cell_models.TentusscherEpi()
+            tentusscher_endo = CellModel.TentusscherEndo()
+            tentusscher_mid = CellModel.TentusscherMid()
+            tentusscher_epi = CellModel.TentusscherEpi()
 
-            self._add_Tentusscher_keyword(matid=-endo_id, params=tentusscher_endo.model_dump())
-            self._add_Tentusscher_keyword(matid=-mid_id, params=tentusscher_mid.model_dump())
-            self._add_Tentusscher_keyword(matid=-epi_id, params=tentusscher_epi.model_dump())
+            self._add_Tentusscher_keyword(matid=-endo_id, params=tentusscher_endo.to_dictionary())
+            self._add_Tentusscher_keyword(matid=-mid_id, params=tentusscher_mid.to_dictionary())
+            self._add_Tentusscher_keyword(matid=-epi_id, params=tentusscher_epi.to_dictionary())
 
     def _create_myocardial_nodeset_layers(self) -> tuple[int, int, int]:
         """Create myocardial node set layers."""
@@ -483,20 +722,230 @@ class ElectrophysiologyDynaWriter(BaseDynaWriter):
         self.kw_database.node_sets.append(node_set_kw)
         return endo_nodeset_id, mid_nodeset_id, epi_nodeset_id
 
-    def _add_cell_model_keyword(self, matid: int, cellmodel: cell_models.Tentusscher) -> None:
+    def _update_parts_cellmodels3(self, n_layers : int = 8) -> None:
+        """Add cell model for each defined part."""
+        for part in self.model.parts:
+            if isinstance(part.ep_material, EPMaterial.Active):
+                ep_mid = part.pid
+                # One cell model for myocardium, default value is epi layer parameters
+                self._add_cell_model_keyword(matid=ep_mid, cellmodel=part.ep_material.cell_model)
+
+        if "transmural" not in self.model.mesh.point_data:
+            return
+
+        region_nodeset_ids = self._create_myocardial_nodeset_layers3(n_layers)
+
+        endo_ref = cell_models.TentusscherEndo2()
+        epi_ref  = cell_models.TentusscherEpi2()
+
+        endo_ref = cell_models.TentusscherEndo_temp()
+        epi_ref  = cell_models.TentusscherEpi_temp()
+
+        gto_endo = getattr(endo_ref, "gto", 0.0)  
+        gks_endo = getattr(endo_ref, "gks", 0.0)   
+        gto_epi  = getattr(epi_ref, "gto", 0.0)   
+        gks_epi  = getattr(epi_ref, "gks", 0.0)    
+
+        for region_name, layer_ids in region_nodeset_ids.items():
+
+            if region_name == "SEP":
+                for i,layer_id in enumerate(layer_ids):
+                    model_layer = cell_models.TentusscherEdit(gto=gto_endo, gks=gks_endo)
+                    # Ajout du mot-clé Tentusscher pour cette couche
+                    self._add_Tentusscher_keyword(matid=-layer_id, params=model_layer.model_dump())
+            else : 
+                n = len(layer_ids)
+                if n == 0:
+                    continue
+
+                for i, layer_id in enumerate(layer_ids):
+                    alpha = i / (n - 1) if n > 1 else 0.0
+
+                    # Interpolation linéaire gto / gks entre endo et epi
+                    gto_val = (1 - alpha) * gto_endo + alpha * gto_epi
+                    gks_val = (1 - alpha) * gks_endo + alpha * gks_epi
+                    gto_val = round(gto_val, 3)
+                    gks_val = round(gks_val, 3)
+                    # Création du modèle cellulaire correspondant
+                    model_layer = cell_models.TentusscherEdit(gto=gto_val, gks=gks_val)
+                    # Ajout du mot-clé Tentusscher pour cette couche
+                    self._add_Tentusscher_keyword(matid=-layer_id, params=model_layer.model_dump())
+    
+
+
+    def _update_parts_cellmodels4(self, n_layers : int = 8) -> None:
+        """Add cell model for each defined part."""
+
+        def _round_sig(x: float, sig: int = 6) -> float:
+            """Arrondi à `sig` chiffres significatifs.
+            Conserve le format scientifique des valeurs très petites."""
+            if x == 0:
+                return 0.0
+            from math import log10, floor
+            return round(x, sig - 1 - floor(log10(abs(x))))
+
+        # --- models initialization ---
+        for part in self.model.parts:
+            if isinstance(part.ep_material, EPMaterial.Active) and part.name not in ["Right atrium", "Left atrium"]:
+                self._add_cell_model_keyword(matid=part.pid,
+                                            cellmodel=part.ep_material.cell_model)
+            if part.name == "Right atrium":
+                self._add_Tentusscher_keyword(matid=part.pid,
+                                            params=cell_models.TentusscherAtria().model_dump())
+                
+            if part.name == "Left atrium":
+                self._add_Tentusscher_keyword(matid=part.pid,
+                                            params=cell_models.TentusscherAtria().model_dump())
+
+        # Define a different cell model for atria to shorten the action potential duration        
+    
+
+        if "transmural" not in self.model.mesh.point_data:
+            return
+
+        region_nodeset_ids = self._create_myocardial_nodeset_layers3(n_layers)
+
+        endo_ref = cell_models.TentusscherEndo_temp()
+        epi_ref  = cell_models.TentusscherEpi_temp()
+
+        endo_dict = endo_ref.model_dump()
+        epi_dict  = epi_ref.model_dump()
+
+        
+        # paramètres numériques communs
+        common_numeric_keys = [
+            k for k in endo_dict.keys()
+            if k in epi_dict
+            and isinstance(endo_dict[k], (int, float))
+            and isinstance(epi_dict[k], (int, float))
+        ]
+
+        # --- Parcours des régions transmural ---
+        for region_name, layer_ids in region_nodeset_ids.items():
+
+            if region_name == "SEP":
+                for layer_id in layer_ids:
+                    model_layer = cell_models.TentusscherEdit(
+                        **{k: endo_dict[k] for k in common_numeric_keys}
+                    )
+                    self._add_Tentusscher_keyword(matid=-layer_id,
+                                                params=model_layer.model_dump())
+                continue
+
+            n = len(layer_ids)
+            if n == 0:
+                continue
+
+            for i, layer_id in enumerate(layer_ids):
+                alpha = i / (n - 1) if n > 1 else 0.0
+
+                interpolated = {
+                    k: _round_sig((1 - alpha) * endo_dict[k] + alpha * epi_dict[k], sig=6)
+                    for k in common_numeric_keys
+                }
+
+                model_layer = cell_models.TentusscherEdit(**interpolated)
+                self._add_Tentusscher_keyword(matid=-layer_id,
+                                            params=model_layer.model_dump())
+
+        
+
+
+    def _create_myocardial_nodeset_layers3(self, n_layers : int)  -> dict[str, list[int]]:
+        
+        values = self.model.mesh.point_data["transmural"]
+
+        # --- Masques régionaux ---
+        lv_mask = self._create_mask_part(
+            part_elem=self.model.left_ventricle.get_element_ids(self.model.mesh)
+        )
+        rv_mask = self._create_mask_part(
+            part_elem=self.model.right_ventricle.get_element_ids(self.model.mesh)
+        )
+        septum_mask = self._create_mask_part(
+            part_elem=self.model.septum.get_element_ids(self.model.mesh)
+        )
+
+        region_masks = {
+            "LV": lv_mask,
+            "RV": rv_mask,
+            "SEP": septum_mask,
+        }
+
+        region_nodeset_ids: dict[str, list[int]] = {}
+
+        # --- Boucle sur les régions ---
+        for region_name, region_mask in region_masks.items():
+
+            layers = self._get_layer_nodes3(mask=region_mask, values=values, n_layers=n_layers)
+
+            layer_ids = []
+
+            for layer_name, layer_nodes in layers.items():
+                if len(layer_nodes) == 0:
+                    continue
+
+                nodeset_id = self.get_unique_nodeset_id()
+                layer_ids.append(nodeset_id)
+
+                node_set_kw = create_node_set_keyword(
+                    node_ids=layer_nodes + 1,  # conversion 0-based → 1-based
+                    node_set_id=nodeset_id,
+                    title=f"{region_name}-{layer_name}",
+                )
+                self.kw_database.node_sets.append(node_set_kw)
+
+            region_nodeset_ids[region_name] = layer_ids
+
+        return region_nodeset_ids
+
+    def _get_layer_nodes3(self, mask: np.ndarray, values: np.ndarray, n_layers: int) -> dict[str, np.ndarray]:
+        thresholds = np.linspace(0, 1, n_layers + 1)
+        layers = {}
+        for i in range(n_layers):
+            th_min = thresholds[i]
+            th_max = thresholds[i + 1]
+            layer_nodes = np.where(
+                mask & (values >= th_min) & (values < th_max)
+            )[0]
+            layers[f"Layer_{i + 1}"] = layer_nodes
+
+        # Le dernier intervalle peut exclure les points à values == 1.0 → on les ajoute à la dernière couche
+        last_layer = f"Layer_{n_layers}"
+        layers[last_layer] = np.unique(
+            np.concatenate([
+                layers[last_layer],
+                np.where(mask & (values == 1.0))[0]
+            ])
+        )
+
+        return layers
+
+
+    def _create_mask_part(self, part_elem):
+        part_nodes_id=[]
+        part_mask = np.zeros(self.model.mesh.n_points, dtype=bool)
+        for cell_id in part_elem:
+            cell_point_ids = self.model.mesh.get_cell(cell_id).point_ids
+            part_nodes_id.extend(cell_point_ids)
+        part_nodes_id = np.unique(part_nodes_id) 
+        part_mask[part_nodes_id] = True
+        return part_mask
+
+    def _add_cell_model_keyword(self, matid: int, cellmodel: CellModel) -> None:
         """Add cell model keyword to the database."""
-        if isinstance(cellmodel, cell_models.Tentusscher):
-            self._add_Tentusscher_keyword(matid=matid, params=cellmodel.model_dump())
+        if isinstance(cellmodel, CellModel.Tentusscher):
+            self._add_Tentusscher_keyword(matid=matid, params=cellmodel.to_dictionary())
         else:
             raise NotImplementedError
 
     def _add_Tentusscher_keyword(self, matid: int, params: dict) -> None:  # noqa N802
         cell_kw = keywords.EmEpCellmodelTentusscher(**{**params})
         cell_kw.mid = matid
-        # NOTE: bug in EmEpCellmodelTentusscher
+        # Note: bug in EmEpCellmodelTentusscher
         # the following 2 parameters cannot be assigned by above method
-        cell_kw.gas_constant = params.get("gas_constant", 8314.4720)
-        cell_kw.faraday_constant = params.get("faraday_constant", 96485.3415)
+        cell_kw.gas_constant = 8314.472
+        cell_kw.faraday_constant = 96485.3415
 
         self.kw_database.cell_models.append(cell_kw)
 
@@ -809,12 +1258,7 @@ class ElectrophysiologyDynaWriter(BaseDynaWriter):
         beam_pid = []
         registered_surfaces = [surf for part in self.model.parts for surf in part.surfaces]
         for beam in self.model.conduction_paths:
-            if (
-                not isinstance(
-                    beam.ep_material, (ep_materials.EPMaterialModel, ep_materials.Insulator)
-                )
-                or beam.ep_material is None
-            ):
+            if isinstance(beam.ep_material, EPMaterial.DummyMaterial):
                 epmat = self._get_default_beam_ep_material()
             else:
                 epmat = beam.ep_material
@@ -903,11 +1347,11 @@ class ElectrophysiologyDynaWriter(BaseDynaWriter):
 
         return beam_pid
 
-    def _get_default_beam_ep_material(self) -> ep_materials.ActiveBeam:
+    def _get_default_beam_ep_material(self) -> EPMaterial.ActiveBeam:
         """Get default EP material for conduction beams."""
         material_settings = self.settings.electrophysiology.material
         solvertype = self.settings.electrophysiology.analysis.solvertype
-        default_epmat = ep_materials.ActiveBeam()
+        default_epmat = EPMaterial.ActiveBeam()
         if solvertype == "Monodomain":
             sig1 = material_settings.beam["sigma"].m
         else:
@@ -963,9 +1407,9 @@ class ElectrophysiologyDynaWriter(BaseDynaWriter):
         return
 
     def _get_ep_material_kw(
-        self, ep_mid: int, ep_material: ep_materials.EPMaterialModel
+        self, ep_mid: int, ep_material: EPMaterial
     ) -> Union[custom_keywords.EmMat001, custom_keywords.EmMat003]:
-        if type(ep_material) is ep_materials.Insulator:
+        if type(ep_material) is EPMaterial.Insulator:
             # insulator mtype
             mtype = 1
             kw = custom_keywords.EmMat001(
@@ -977,7 +1421,7 @@ class ElectrophysiologyDynaWriter(BaseDynaWriter):
             )
 
         # active myocardium
-        elif type(ep_material) is ep_materials.Active:
+        elif type(ep_material) is EPMaterial.Active:
             mtype = 2
             # "isotropic" case
             if ep_material.sigma_sheet is None:
@@ -1002,7 +1446,7 @@ class ElectrophysiologyDynaWriter(BaseDynaWriter):
                 d3=0,
             )
 
-        elif type(ep_material) is ep_materials.ActiveBeam:
+        elif type(ep_material) is EPMaterial.ActiveBeam:
             mtype = 2
             kw = custom_keywords.EmMat001(
                 mid=ep_mid,
@@ -1011,7 +1455,7 @@ class ElectrophysiologyDynaWriter(BaseDynaWriter):
                 beta=ep_material.beta,
                 cm=ep_material.cm,
             )
-        elif type(ep_material) is ep_materials.Passive:
+        elif type(ep_material) is EPMaterial.Passive:
             mtype = 4
             # isotropic
             if ep_material.sigma_sheet is None:

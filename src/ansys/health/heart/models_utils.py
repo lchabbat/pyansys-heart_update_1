@@ -271,7 +271,7 @@ def define_fascile_bundle_end_node(
 
 
 def define_full_conduction_system(
-    model: models.FullHeart | models.FourChamber | models.BiVentricle,
+    model: models.FullHeart | models.FourChamber,
     purkinje_folder: str,
     landmarks: LandMarks = None,
 ) -> tuple[list[ConductionPath], LandMarks]:
@@ -279,7 +279,7 @@ def define_full_conduction_system(
 
     Parameters
     ----------
-    model : models.FullHeart | models.FourChamber | models.BiVentricle
+    model : models.FullHeart | models.FourChamber
         Heart model.
     purkinje_folder : str
         Folder with LS-DYNA's Purkinje generation.
@@ -301,6 +301,23 @@ def define_full_conduction_system(
         base_mesh=model.left_ventricle.endocardium,
         model=model,
     )
+    """
+    LAF_purkinje = ConductionPath.create_from_k_file(
+        ConductionPathType.LAF_PURKINJE,
+        k_file=os.path.join(purkinje_folder, "purkinjeNetwork_012.k"),
+        id=9,
+        base_mesh=model.left_ventricle.endocardium,
+        model=model,
+    )
+
+    LPF_purkinje = ConductionPath.create_from_k_file(
+        ConductionPathType.LPF_PURKINJE,
+        k_file=os.path.join(purkinje_folder, "purkinjeNetwork_013.k"),
+        id=10,
+        base_mesh=model.left_ventricle.endocardium,
+        model=model,
+    )
+    """
 
     right_purkinje = ConductionPath.create_from_k_file(
         ConductionPathType.RIGHT_PURKINJE,
@@ -310,10 +327,6 @@ def define_full_conduction_system(
         model=model,
     )
 
-    if isinstance(model, models.BiVentricle):
-        return [left_purkinje, right_purkinje], landmarks
-
-    # Define other parts of the conduction system
     sa = define_sino_atrial_node(model, landmarks)
     av = define_atrio_ventricular_node(model, landmarks)
 
@@ -356,7 +369,7 @@ def define_full_conduction_system(
 
     left_bundle = ConductionPath.create_from_keypoints(
         name=ConductionPathType.LEFT_BUNDLE_BRANCH,
-        keypoints=[his_left_point.xyz, model.left_ventricle.apex_points[0].xyz],
+        keypoints=[his_left_point.xyz, model.left_ventricle.apex_points[0].xyz],  #[90, 44, 44],
         id=7,
         base_mesh=model.left_ventricle.endocardium,
         line_length=None,
@@ -381,7 +394,7 @@ def define_full_conduction_system(
 
     right_bundle = ConductionPath.create_from_keypoints(
         name=ConductionPathType.RIGHT_BUNDLE_BRANCH,
-        keypoints=[his_right_point.xyz, model.right_ventricle.apex_points[0].xyz],
+        keypoints=[his_right_point.xyz, model.right_ventricle.apex_points[0].xyz],     #keypoints=[his_right_point.xyz, [92, 24, 25]],
         id=8,
         base_mesh=endo_surface,
         line_length=None,
@@ -398,6 +411,8 @@ def define_full_conduction_system(
         his_right,
         left_bundle,
         right_bundle,
+        #LAF_purkinje,
+        #LPF_purkinje,
     ]
 
     return paths, landmarks

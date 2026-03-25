@@ -55,9 +55,7 @@ from ansys.health.heart.settings.material.material import (
     ACTIVE,
     ANISO,
     ISO,
-    ActiveModel1,
-    ActiveModel3,
-    HGOFiber,
+    ActiveModel,
     Mat295,
 )
 
@@ -378,6 +376,37 @@ class Purkinje(Settings):
     """Purkinje muscle junction type."""
     pmjradius: Quantity = 0
     """Purkinje muscle junction radius."""
+    origins_right: list = None
+    """List of coordinates for the origins of the right purkinjes"""
+    origins_left: list=None
+    """List of coordinates for the origins of the left purkinjes"""
+
+@dataclass(repr=False)
+class Purkinje2(Settings):
+    """Class for keeping track of Purkinje settings."""
+
+    node_id_origin_left: int = None
+    """Left Purkinje origin ID."""
+    node_id_origin_right: int = None
+    """Right Purkinje origin id."""
+    edgelen: Quantity = 0
+    """Edge length."""
+    ngen: Quantity = 0
+    """Number of generations."""
+    nbrinit: Quantity = 0
+    """Number of beams from origin point."""
+    nsplit: Quantity = 0
+    """Number of splits at each leaf."""
+    pmjtype: Quantity = 0
+    """Purkinje muscle junction type."""
+    pmjradius: Quantity = 0
+    """Purkinje muscle junction radius."""
+    origins_right: list = field(default_factory=list)
+    """List of coordinates/dicts for the origins of the right purkinjes.
+       Each entry can be a dict: {"name": str, "coords": [x,y,z], "params": {"ngen":..., "edgelen":..., ...}}"""
+    origins_left: list = field(default_factory=list)
+    """List of coordinates/dicts for the origins of the left purkinjes
+       (same format as origins_right)."""
 
 
 class SimulationSettings:
@@ -776,10 +805,10 @@ def _read_myocardium_property(mat: AttrDict, coupled=False) -> Mat295:
         beta=2,
     )
 
-    fibers = [HGOFiber(k1=mat["anisotropic"]["k1f"].m, k2=mat["anisotropic"]["k2f"].m)]
+    fibers = [ANISO.HGOFiber(k1=mat["anisotropic"]["k1f"].m, k2=mat["anisotropic"]["k2f"].m)]
 
     if "k1s" in mat["anisotropic"]:
-        sheet = HGOFiber(k1=mat["anisotropic"]["k1s"].m, k2=mat["anisotropic"]["k2s"].m)
+        sheet = ANISO.HGOFiber(k1=mat["anisotropic"]["k1s"].m, k2=mat["anisotropic"]["k2s"].m)
         fibers.append(sheet)
 
     if "k1fs" in mat["anisotropic"]:
@@ -794,8 +823,8 @@ def _read_myocardium_property(mat: AttrDict, coupled=False) -> Mat295:
     sn = mat["active"]["sn"]
 
     if not coupled:
-        ac_mdoel = ActiveModel1(taumax=max)  # use default field in Model1 except taumax
-        curve = ActiveCurve(func=constant_ca2(tb=bt), threshold=0.1, type="ca2")
+        ac_mdoel = ActiveModel.Model1(taumax=max)  # use default field in Model1 except taumax
+        curve = ActiveCurve(constant_ca2(tb=bt), threshold=0.1, type="ca2")
         active = ACTIVE(
             ss=ss,
             sn=sn,
@@ -803,7 +832,7 @@ def _read_myocardium_property(mat: AttrDict, coupled=False) -> Mat295:
             ca2_curve=curve,
         )
     else:
-        ac_mdoel = ActiveModel3(
+        ac_mdoel = ActiveModel.Model3(
             ca2ion50=0.001,
             n=2,
             f=0.0,

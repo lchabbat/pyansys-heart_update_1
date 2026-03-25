@@ -34,4 +34,6 @@ build = {
     "nsplit": Quantity(4, "dimensionless"),
     "pmjtype": Quantity(2, "dimensionless"),
     "pmjradius": Quantity(1.5, "dimensionless"),
+    "origins_right": [],
+    "origins_left": [],
 }
