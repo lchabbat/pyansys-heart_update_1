@@ -1,0 +1,1166 @@
+
+
+###############################################################################
+# Perform the required imports
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Import the required modules and set relevant paths, including that of the working
+# directory, heart model, and LS-DYNA executable file.
+
+import os
+from pathlib import Path
+import ansys.health.heart.models as models
+from ansys.health.heart.simulator import DynaSettings, EPSimulator
+import numpy as np
+from ansys.health.heart.objects import SurfaceMesh
+from ansys.health.heart.pre.conduction_path import ConductionPath, ConductionPathType
+import ansys.health.heart.models_utils as mu
+import pyvista as pv
+import ansys.health.heart.models_utils as heart_model_utils
+from ansys.health.heart.objects import Point
+from scipy.spatial.transform import Rotation as R
+import shutil
+
+
+# Set the working directory and path to the model you downloaded and meshed
+
+workdir = Path.home()/"your_path"
+path_to_model = str(workdir / f"heart_model.vtu")
+path_to_partinfo = str(workdir / f"heart_model.partinfo.json")
+simulation_folder_name = 'your_simulation_folder'
+
+ventricle_simulation_only = False
+
+os.environ["ANSYS_DPF_ACCEPT_LA"] = "Y"
+
+def merge_surfaces(surf1: SurfaceMesh, surf2: SurfaceMesh, keep="first") -> SurfaceMesh:
+
+    merged = surf1.merge(surf2, merge_points=True, tolerance=1e-8)
+    new_surf = SurfaceMesh(merged)
+    new_surf.nodes = np.array(new_surf.points)
+    faces = np.reshape(new_surf.faces, (new_surf.n_cells, 4))[:, 1:]
+    new_surf.triangles = faces
+    if keep == "first":
+        new_surf.id = surf1.id
+        new_surf.name = surf1.name
+    else:
+        new_surf.id = surf2.id
+        new_surf.name = surf2.name
+    return new_surf
+
+def transpose_electrodes( angle1 : int, angle2= int):
+
+    electrodes = np.array([
+        [-24, 1331, 114],
+        [24, 1331, 114],
+        [52, 1299, 125],
+        [81, 1280, 116],
+        [129, 1279, 86],
+        [150, 1294, 46],
+        [-84, 1456, 28],
+        [84, 1456, 28],
+        [-80, 1150, 34],
+        [80, 1150, 34]
+    ])
+
+    Hans_apex = np.array([65, 1265, 72])
+    Hans_mitral = np.array([28,1310,-1.5])
+    Hans_tricuspide = np.array([-10,1305,35])
+    Hans_V_pulm = np.array([25, 1353, 22])
+
+    Rodero_apex = np.array([108,15,12])
+    Rodero_tricuspide = np.array([42,49,47])
+    Rodero_mitral  = np.array([78,78,62])
+    Rodero_V_pulm = np.array([73, 42, 105])
+
+    P_Hans=np.array([Hans_apex, Hans_tricuspide, Hans_mitral,  Hans_V_pulm])
+    P_Model= np.array([Rodero_apex, Rodero_tricuspide, Rodero_mitral, Rodero_V_pulm])
+
+    AR, TR, MR, RP = Rodero_apex, Rodero_tricuspide, Rodero_mitral, Rodero_V_pulm
+
+    #Translation    
+    T = P_Model[0] - P_Hans[0]
+    P_Hans_T = P_Hans + T
+
+    #R1
+    AH, TH, MH = P_Hans_T[0], P_Hans_T[1], P_Hans_T[2]
+    VT_Hans = TH - AH
+    VT_Model = TR - AR 
+    normal_R1 = np.cross(VT_Model, VT_Hans)
+    angle_deg_R1 = np.degrees(-np.arccos(np.dot(VT_Hans, VT_Model) / (np.linalg.norm(VT_Model) * np.linalg.norm(VT_Hans))))+angle1      
+    axis_R1 = normal_R1 / np.linalg.norm(normal_R1)
+    rot_R1 = R.from_rotvec( np.radians(angle_deg_R1) * axis_R1)
+    P_Hans_R1 = rot_R1.apply(P_Hans_T - AR) + AR
+
+    #R2
+    AH, TH, MH = P_Hans_R1[0], P_Hans_R1[1], P_Hans_R1[2]
+    VM_Hans = MH - TH
+    VM_Model = MR - TR
+    normal_R2 = TH - AH
+    angle_deg_R2 = -np.degrees(np.arccos(np.dot(VM_Hans, VM_Model) / (np.linalg.norm(VM_Hans) * np.linalg.norm(VM_Model))))+angle2
+    axis_R2 = normal_R2 / np.linalg.norm(normal_R2)
+    rot_R2 = R.from_rotvec(np.radians(angle_deg_R2) * axis_R2)
+    P_Hans_R2 = rot_R2.apply(P_Hans_R1 - TR) + TR
+
+    AH, TH, MH = P_Hans_R2[0], P_Hans_R2[1], P_Hans_R2[2]
+
+    electrodes_T= electrodes + T
+    electrodes_R1 = rot_R1.apply(electrodes_T - AR) + AR
+    electrodes_R2 = rot_R2.apply(electrodes_R1 - TR) + TR
+
+    electrodes_align = electrodes_R2
+
+    return electrodes_align
+
+
+
+
+###############################################################################
+# Load the full-heart model
+model: models.FullHeart = models.HeartModel.load_model(
+    path_to_model, path_to_partinfo, working_directory=workdir
+)
+
+# Save the model.
+model.mesh.save(os.path.join(model.workdir, "simulation_model.vtu"))
+
+###############################################################################
+# Instantiate the simulator and define settings.
+# ~~~~~~~~~~~~~~~~~~~~~~~~~
+# Specify the LS-DYNA path. 
+
+lsdyna_path =
+
+# Instantiate LS-DYNA settings.
+dyna_settings = DynaSettings(
+    lsdyna_path=lsdyna_path, dynatype="msmpi", num_cpus=12, platform="windows"
+)
+
+# Instantiate the simulator, modifying options as necessary.
+simulator = EPSimulator(
+    model=model,
+    dyna_settings=dyna_settings,
+    simulation_directory=os.path.join(workdir, simulation_folder_name),
+)
+
+
+plot = True
+plot = False
+
+###############################################################################
+# Load simulation settings
+# ~~~~~~~~~~~~~~~~~~~~~~~~
+
+simulator.settings.load_defaults()
+
+###############################################################################
+#Transposition électrodes
+new_electrodes = transpose_electrodes(angle1 = 0, angle2 = 0)
+
+heart_model = pv.read(str(workdir / f"heart_model.vtu"))
+
+if plot == True:
+    plotter = pv.Plotter()
+    point_cloud_1 = pv.PolyData(new_electrodes)
+    plotter.add_mesh(point_cloud_1, color='blue', point_size=10, render_points_as_spheres=True)
+    plotter.add_mesh(heart_model, color='red', show_edges=False, opacity = 0.5)
+    plotter.show()
+
+simulator.model.electrodes = [
+    Point(name="V1", xyz=new_electrodes[0]),
+    Point(name="V2", xyz=new_electrodes[1]),
+    Point(name="V3", xyz=new_electrodes[2]),
+    Point(name="V4", xyz=new_electrodes[3]),
+    Point(name="V5", xyz=new_electrodes[4]),
+    Point(name="V6", xyz=new_electrodes[5]),
+    Point(name="RA", xyz=new_electrodes[6]),
+    Point(name="LA", xyz=new_electrodes[7]),
+    Point(name="RL", xyz=new_electrodes[8]),
+    Point(name="LL", xyz=new_electrodes[9]),
+]
+
+###############################################################################
+# Compute fiber orientation and plot the fibers on the entire model.
+
+# Import the appendage landmarks.
+from ansys.health.heart.pre.database_utils import right_atrium_appendage_landmarks
+
+# Get the right atrium appendage landmark of the first case of Rodero2021.
+right_atrium_appendage_coordinates = right_atrium_appendage_landmarks.get("Rodero2021").get(1)
+
+# Compute ventricular fibers.
+simulator.compute_fibers(method="D-RBM")
+
+# Compute atrial fibers.
+simulator.model.right_atrium.active = True
+simulator.model.left_atrium.active = True
+simulator.model.right_atrium.fiber = True
+simulator.model.left_atrium.fiber = True
+simulator.compute_left_atrial_fiber()
+simulator.compute_right_atrial_fiber(appendage=right_atrium_appendage_coordinates)
+#simulator.model.plot_fibers(n_seed_points=1000)
+
+simulator.compute_uhc()
+
+####################################################################################
+#Compute Purkinje network 
+ 
+# merge the RV endocardium and the right side of the septum to generate purkinje on the right part of the septum as well (particularly important for LBBB simulations)
+simulator.model.right_ventricle.endocardium=merge_surfaces(simulator.model.right_ventricle.endocardium, simulator.model.right_ventricle.septum, keep="first") 
+
+directory = os.path.join(simulator.root_directory, "purkinjegeneration")
+orig_num_cpus = simulator.dyna_settings.num_cpus
+simulator.dyna_settings.num_cpus = 1
+
+ureg = simulator.settings.purkinje.pmjtype._REGISTRY
+simulator.settings.purkinje.pmjtype = 1 * ureg.dimensionless
+
+#shorten the length of the purkinje branches
+simulator.settings.purkinje.edgelen = 0.5 * ureg.dimensionless
+
+#increase the density of the purkinje network
+simulator.settings.purkinje.nsplit = 6 * ureg.dimensionless
+simulator.settings.purkinje.nbrinit = 6 * ureg.dimensionless
+
+# make sure the purkinje goes to the top of the ventricles 
+simulator.settings.purkinje.ngen = 300 * ureg.dimensionless
+
+
+
+simulator._write_purkinje_files(directory)
+input_file = os.path.join(directory, "main.k")
+simulator._run_dyna(input_file)
+simulator.dyna_settings.num_cpus = orig_num_cpus
+
+directory = os.path.join(simulator.root_directory, "purkinjegeneration")
+print(os.path.join(simulator.root_directory, "purkinjegeneration"))
+
+
+
+###############################################################################
+# Compute the conduction system 
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+beam_list, simulator.model._landmarks = heart_model_utils.define_full_conduction_system(
+                simulator.model, os.path.join(simulator.root_directory, "purkinjegeneration")
+            )
+
+[   left_purkinje,
+    right_purkinje,
+    sa_av,
+    his_top,
+    his_left,
+    his_right,
+    left_bundle,
+    right_bundle,
+    ]   = beam_list
+
+# Create the Bachmann bundle
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+bachman_bundle = ConductionPath.create_from_keypoints(
+    name=ConductionPathType.BACHMANN_BUNDLE,
+    keypoints= [[16, 68, 91], 
+               [21, 76, 86], 
+               [53,100,86]],
+    id=9,
+    base_mesh=model.left_atrium.endocardium,
+    line_length=None,
+    center=True,
+)
+bachman_bundle.add_pmj_path(list(range(1, bachman_bundle.mesh.n_points - 1, 4)))
+bachman_bundle.up_path = sa_av
+# The mid and post SA-AV node conduction paths are created by providing a list of keypoints.
+mid_sa_av = ConductionPath.create_from_keypoints(
+    name=ConductionPathType.MID_SAN_AVN,
+    keypoints=[
+        simulator.model._landmarks.sa_node.xyz,
+        [0,54,70],
+        [4,40,55],
+        [8,34,34],
+        simulator.model._landmarks.av_node.xyz,
+    ],
+    id=10,
+    base_mesh=model.right_atrium.endocardium,
+    line_length=None,
+    center=True,
+)
+mid_sa_av.add_pmj_path(list(range(5, mid_sa_av.mesh.n_points - 5, 4)))
+mid_sa_av.up_path = sa_av
+mid_sa_av.down_path = sa_av
+
+
+post_sa_av = ConductionPath.create_from_keypoints(
+    name=ConductionPathType.POST_SAN_AVN,
+    keypoints=[simulator.model._landmarks.sa_node.xyz, 
+               [2, 65, 53], 
+               [6, 73, 34], 
+               [25, 75, 26],  
+               simulator.model._landmarks.av_node.xyz],
+    id=11,
+    base_mesh=model.right_atrium.endocardium,
+    line_length=None,
+    center=True,
+)
+post_sa_av.add_pmj_path(list(range(5, post_sa_av.mesh.n_points - 5, 4)))
+post_sa_av.up_path = sa_av
+post_sa_av.down_path = sa_av
+
+###############################################################################
+# Create the left anterior fascicle
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+left_anterio_fascile = ConductionPath.create_from_keypoints(
+    name=ConductionPathType.LEFT_ANTERIOR_FASCILE,
+    keypoints=[simulator.model._landmarks.his_left_end_node.xyz, [115, 91, 53]],  
+
+    id=12,
+    base_mesh=model.left_ventricle.endocardium,
+    connection=None,
+    line_length=None,
+)
+left_anterio_fascile.up_path = his_left
+left_anterio_fascile.down_path = left_purkinje
+
+###############################################################################
+# Create the left posterior fascicle
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+left_posterior_fascile = ConductionPath.create_from_keypoints(
+    name=ConductionPathType.LEFT_POSTERIOR_FASCICLE,
+    keypoints=[simulator.model._landmarks.his_left_end_node.xyz, [124, 60, 32]],  
+    id=13,
+    base_mesh=model.left_ventricle.endocardium,
+    connection=None,
+    line_length=None,
+)
+left_posterior_fascile.up_path = his_left
+left_posterior_fascile.down_path = left_purkinje
+
+
+
+###############################################################################
+# Create a bonus fascicle in the LV to adjust the activation sequence. Could be removed by tuning more precisely the endpoints of the posterior and anterior fascicles
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+left_bonus_fascile = ConductionPath.create_from_keypoints(
+    name=ConductionPathType.LEFT_BONUS_FASCICLE,
+    keypoints=[simulator.model._landmarks.his_left_end_node.xyz, [82, 86, 42]],   
+    id=14,
+    base_mesh=model.left_ventricle.endocardium,
+    connection=None,
+    line_length=None,
+)
+left_bonus_fascile.up_path = his_left
+left_bonus_fascile.down_path = left_purkinje
+
+model.assign_conduction_paths([
+        left_purkinje,
+        right_purkinje,
+        sa_av,
+        his_top,
+        his_left,
+        his_right,
+        left_bundle,
+        right_bundle,
+        bachman_bundle,
+        mid_sa_av,
+        post_sa_av,
+        left_anterio_fascile,
+        left_posterior_fascile,
+        left_bonus_fascile,
+        ])
+
+plot = True
+if plot == True : 
+    # Visualize the entire conduction system
+    simulator.model.plot_purkinje()
+plot = False
+
+
+###############################################################################
+# Material parameters for the new parts of the conduction system
+
+from ansys.health.heart.settings.material.ep_material import CellModel, EPMaterial
+#atrium conduction path
+mat_sa_av = EPMaterial.ActiveBeam()
+mat_sa_av.sigma_fiber = 2.25
+mat_sa_av.pmjres = 0.001
+simulator.model.conduction_paths[2].ep_material = mat_sa_av
+simulator.model.conduction_paths[8].ep_material = mat_sa_av
+simulator.model.conduction_paths[9].ep_material = mat_sa_av
+simulator.model.conduction_paths[10].ep_material = mat_sa_av
+#hit_top
+mat_his_top = EPMaterial.ActiveBeam()
+mat_his_top.sigma_fiber = 0.1
+mat_his_top.pmjres = 0.001
+simulator.model.conduction_paths[3].ep_material = mat_his_top
+
+mat_purkinje = EPMaterial.ActiveBeam()
+mat_purkinje.sigma_fiber = 2.0
+mat_purkinje.pmjres = 0.001
+#his_left & his_right
+simulator.model.conduction_paths[4].ep_material = mat_purkinje
+simulator.model.conduction_paths[5].ep_material = mat_purkinje
+#left_bundle_branch & right_bundle_branch
+simulator.model.conduction_paths[6].ep_material = mat_purkinje
+simulator.model.conduction_paths[7].ep_material = mat_purkinje
+simulator.model.conduction_paths[0].ep_material = mat_purkinje
+simulator.model.conduction_paths[1].ep_material = mat_purkinje
+
+#left_ventricle_fascicles
+traveltime = 28
+mat_left_anterio_fascile = EPMaterial.ActiveBeam()
+mat_left_anterio_fascile.sigma_fiber = simulator.model.conduction_paths[11].mesh.length/traveltime
+mat_left_anterio_fascile.pmjres = 0.001
+simulator.model.conduction_paths[11].ep_material = mat_left_anterio_fascile
+
+mat_left_post_fascile = EPMaterial.ActiveBeam()
+mat_left_post_fascile.sigma_fiber = simulator.model.conduction_paths[12].mesh.length/traveltime
+mat_left_post_fascile.pmjres = 0.001
+simulator.model.conduction_paths[12].ep_material = mat_left_post_fascile
+
+mat_left_bonus_fascile = EPMaterial.ActiveBeam()
+mat_left_bonus_fascile.sigma_fiber = simulator.model.conduction_paths[13].mesh.length/traveltime
+mat_left_bonus_fascile.pmjres = 0.001
+simulator.model.conduction_paths[13].ep_material = mat_left_bonus_fascile
+
+
+
+
+# write the simulation files
+simulator.settings.electrophysiology.analysis.solvertype = "ReactionEikonal"
+simulator._write_main_simulation_files(folder_name="main_ep_reaction_eikonal")
+
+
+###############################################################################
+# change the stimulation location to the his_top nodes (if you want to focus on the QRS and reduce computation time)
+###########################################################################
+
+k_files_directory = workdir/simulation_folder_name/"main_ep_reaction_eikonal"
+
+path_to_beam = k_files_directory/"beam_networks.k"
+path_to_main = k_files_directory/"main.k"
+path_to_mat = k_files_directory/"material.k"
+
+
+def extract_his_nodes_from_beam(beam_path: str):
+    """
+    Extract all node ids from ELEMENT_BEAM in PART His_top in beam_networks.k
+    Return a sorted list of these nodes (without duplicates).
+    """
+    his_nodes = set()
+    with open(beam_path, "r") as f:
+        lines = f.readlines()
+
+    n = len(lines)
+    i = 0
+    while i < n:
+        line = lines[i]
+        # locates keyword *PART
+        if line.strip().startswith("*PART"):
+            # lookahead: skip empty lines and comment lines ($# ...)
+            j = i + 1
+            while j < n and (lines[j].strip() == "" or lines[j].lstrip().startswith("$#")):
+                j += 1
+            if j < n and lines[j].strip() == "His_top":
+                # scan until the next *PART (or EOF)
+                k = j + 1
+                in_element = False
+                while k < n and not lines[k].strip().startswith("*PART"):
+                    s = lines[k].strip()
+                    # added condition: if line starts with "$$" → stop everything
+                    if s.startswith("$$"):
+                        print("⚠️ Stop : line starting with '$$' encountered.")
+                        return sorted(his_nodes)
+
+                    # detection of the ELEMENT_BEAM header
+                    if s.startswith("*ELEMENT_BEAM"):
+                        in_element = True
+                        k += 1
+                        continue
+
+                    if in_element:
+                        # ignore comments and empty lines
+                        if not s or s.lstrip().startswith("$#"):
+                            k += 1
+                            continue
+                        tokens = s.split()
+                        # check that the line starts with an integer (eid)
+                        if tokens and tokens[0].lstrip("-").isdigit():
+                            if len(tokens) >= 4:
+                                try:
+                                    n1 = int(tokens[2])
+                                    n2 = int(tokens[3])
+                                    his_nodes.update((n1, n2))
+                                except ValueError:
+                                    pass
+                    k += 1
+                break
+            else:
+                i = j
+        i += 1
+
+    return sorted(his_nodes)
+
+
+def update_stim_nodes(parent_folder: str):
+    """
+    Replaces only the Stim nodes lines in ep_settings.k with the His_top nodes.
+    Keeps all other information (sid, da1, etc.).
+    Creates a backup ep_settings.k.bak before overwriting.
+    """
+    ep_path = os.path.join(parent_folder, "ep_settings.k")
+    beam_path = os.path.join(parent_folder, "beam_networks.k")
+
+    # files check
+    if not os.path.exists(ep_path):
+        print(f"❌ Missing file: {ep_path}")
+        return False
+    if not os.path.exists(beam_path):
+        print(f"❌ Missing file: {beam_path}")
+        return False
+
+    # Extract His_top nodes
+    his_nodes = extract_his_nodes_from_beam(beam_path)
+    if not his_nodes:
+        print("❌ No His_top nodes found.")
+        return False
+
+    # Backup before overwriting
+    backup_path = ep_path + ".bak"
+    shutil.copyfile(ep_path, backup_path)
+    print(f"💾 Backup copy created: {backup_path}")
+
+    # Read ep_settings.k
+    with open(ep_path, "r") as f:
+        ep_lines = f.readlines()
+
+    new_lines = []
+    in_nodes_section = False
+
+    for line in ep_lines:
+        stripped = line.strip()
+
+        # Start of the Stim nodes section
+        if stripped.startswith("$#   nodes"):
+            new_lines.append(line)  # keep the header
+
+            # Add the new formatted nodes (8 per line)
+            for i in range(0, len(his_nodes), 8):
+                row = "".join(f"{n:10d}" for n in his_nodes[i:i+8])
+                new_lines.append(row + "\n")
+
+            in_nodes_section = True  # activate old lines skip mode
+            continue
+
+        # If we are in the old nodes section, skip until the next non-nodes line
+        if in_nodes_section:
+            if stripped.startswith("*") or (stripped.startswith("$#") and not stripped.startswith("$#   nodes")):
+                in_nodes_section = False
+                new_lines.append(line)  # add this line to mark the end of the section
+            else:
+                continue  # skip the old node lines
+        else:
+            new_lines.append(line)
+
+    # save the modified ep_settings.k
+    with open(ep_path, "w") as f:
+        f.writelines(new_lines)
+
+    print(f"✅ Successful modification : {len(his_nodes)} nodes injected, old nodes replaced.")
+    return True
+
+
+def modify_part_variable(file_path, part_name, variable_name, new_value):
+    """
+    Modifies the value of a specific variable for a given *PART section in an LS-DYNA .k file. It can be used in beam_networks.k files
+
+    :param file_path: Path to the .k file
+    :param part_name: Exact name of the part (heading) after *PART
+    :param variable_name: Name of the variable exactly as written in the header line ($#)
+    :param new_value: New value (int or float)
+    """
+    # Read the file
+    with open(file_path, 'r') as f:
+        lines = f.readlines()
+
+    # Locate the part section
+    part_line = None
+    for i in range(len(lines)):
+        if lines[i].strip().upper() == f"$$ {part_name} $$".upper():
+            part_line = i
+            break
+
+    if part_line is None:
+        print(f"❌ Part '{part_name}' not found.")
+        return
+
+    # Search for the variable in the block after the part heading
+    variable_line = None
+    value_index = None
+    for j in range(part_line + 1, len(lines)):
+        if lines[j].startswith("$#"):  # header line
+            fields = lines[j][3:].split()
+            if variable_name in fields:
+                value_index = fields.index(variable_name)
+                variable_line = j + 1
+                break
+        elif lines[j].strip().startswith("$$") and j != part_line:
+            break  # Reached another part block before finding the variable
+
+    if variable_line is None or value_index is None:
+        print(f"❌ Variable '{variable_name}' not found in part '{part_name}'.")
+        return
+    
+    if variable_name=='pmjres':
+        value_index+=1
+
+    # Modify the value while preserving the fixed 10-character field format
+    data_line = lines[variable_line]
+    columns = [data_line[i:i+10] for i in range(0, len(data_line.rstrip('\n')), 10)]
+
+    if len(columns) > value_index:
+        if isinstance(new_value, int):
+            columns[value_index] = f"{new_value:10d}"
+        elif isinstance(new_value, float):
+            columns[value_index] = f"{new_value:10.6f}"
+        else:
+            print(f"⚠️ Unsupported value type: {type(new_value)}")
+            return
+
+        lines[variable_line] = ''.join(columns) + '\n'
+
+        # Write changes back to file
+        with open(file_path, 'w') as f:
+            f.writelines(lines)
+
+        print(f"✅ Variable '{variable_name}' updated for part '{part_name}'.")
+    else:
+        print(f"⚠️ Line {variable_line+1} does not have enough columns for index {value_index}.")
+
+
+def set_endtim_in_main(main_k_path: str, new_endtim: float = 600.0) -> bool:
+    """
+    Modifies the endtim value in the *CONTROL_TERMINATION section of main.k.
+    - main_k_path: path to main.k (str)
+    - new_endtim: new value (e.g., 600.0)
+    Returns True if modified, False otherwise.
+    """
+    if not os.path.exists(main_k_path):
+        print(f"❌ missing file : {main_k_path}")
+        return False
+
+    # save backup
+    backup = main_k_path + ".bak"
+    shutil.copyfile(main_k_path, backup)
+    print(f"💾 Backup copy created : {backup}")
+
+    with open(main_k_path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+
+    n = len(lines)
+    # find the *CONTROL_TERMINATION section
+    ctrl_idx = None
+    for i, L in enumerate(lines):
+        if L.strip().upper().startswith("*CONTROL_TERMINATION"):
+            ctrl_idx = i
+            break
+    if ctrl_idx is None:
+        print("❌ *CONTROL_TERMINATION not found in file.")
+        return False
+
+    # find the header line ($# ...) that follows, then the next data line
+    j = ctrl_idx + 1
+    while j < n and not lines[j].strip().startswith("$#"):
+        j += 1
+    if j >= n:
+        print("❌ Header line '$#' for CONTROL_TERMINATION not found.")
+        return False
+
+    data_idx = j + 1
+    # skip empty lines or comments ($#) if necessary
+    while data_idx < n and (lines[data_idx].strip() == "" or lines[data_idx].lstrip().startswith("$#")):
+        data_idx += 1
+    if data_idx >= n:
+        print("❌ Data line for CONTROL_TERMINATION not found.")
+        return False
+
+    # keep the original line (for debug) and replace it by modifying only the first column
+    orig = lines[data_idx].rstrip("\n")
+
+    # adapt to the fixed 10-character width columns
+    width = 10
+    pad_len = ((len(orig) + width - 1) // width) * width
+    pad_line = orig.ljust(pad_len)
+    cols = [pad_line[k:k+width] for k in range(0, pad_len, width)]
+
+    # replace the first column with the new value (format: 1 decimal, width 10)
+    cols[0] = f"{float(new_endtim):10.1f}"
+
+    # reconstruct the line  
+    new_line = "".join(cols).rstrip() + "\n"
+    lines[data_idx] = new_line
+
+    # write the modified file
+    with open(main_k_path, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+
+    print(f"✅ endtime changed : {orig!r} -> {new_line.strip()!r}")
+    return True
+
+
+def replace_mat_blocks_preserve_titles(material_file: str):
+    """
+    Replace:
+      - blocks *EM_MAT_003 (ventricles/septum)
+      - blocks *EM_MAT_001 corresponding to the atria
+    with adapted blocks *EM_MAT_005, keeping the mid and all titles.
+    The other *EM_MAT_001 blocks (aorta, pulmonary artery, etc.) are retained.
+    """
+    if not os.path.exists(material_file):
+        print(f"❌ Missing file: {material_file}")
+        return False
+
+    backup_file = material_file + ".bak"
+    shutil.copyfile(material_file, backup_file)
+    print(f"💾 Backup copy created: {backup_file}")
+
+    with open(material_file, "r") as f:
+        lines = f.readlines()
+
+    new_lines = []
+    i = 0
+    n = len(lines)
+    current_section = ""  # to detect atrium vs ventricles/septum
+
+    while i < n:
+        line = lines[i]
+        stripped = line.strip()
+
+        # Detect the section title
+        if stripped.startswith("$$"):
+            current_section = stripped.lower()
+            new_lines.append(line)
+            i += 1
+            continue
+
+        # DDetect the blocks to replace
+        if (stripped.startswith("*EM_MAT_003") or
+            (stripped.startswith("*EM_MAT_001") and "atrium" in current_section)):
+
+            # retrieve the original mid (first integer value in the following lines)
+            j = i + 1
+            mid = None
+            while j < n and mid is None:
+                tokens = lines[j].split()
+                for t in tokens:
+                    if t.isdigit():
+                        mid = int(t)
+                        break
+                j += 1
+
+            if mid is None:
+                print(f"⚠️ Impossible de trouver mid pour la section {current_section}")
+                mid = 0
+
+            # choose the corresponding EM_MAT_005
+            if "atrium" in current_section:
+                # block atrium
+                new_block = f"""*EM_MAT_005
+$#     mid     mtype   sigma11   sigma22   sigma33      beta        cm
+{mid:10d}         2       1.2       0.6       0.3     140.0      0.01
+$# sigma12   sigma13   sigma21   sigma23   sigma31   sigma32       
+
+$#                     sigma11   sigma22   sigma33  
+                          0.17      0.08      0.08
+
+$#    aopt        xp        yp        zp        a1        a2        a3      macf
+         2                                     0.0       0.0       1.0         1
+$#      v1        v2        v3        d1        d2        d3
+                                     0.0      -1.0       0.0
+"""
+            else:
+                # block ventricule / septum
+                new_block = f"""*EM_MAT_005
+$#     mid     mtype   sigma11   sigma22   sigma33      beta        cm
+{mid:10d}         2       0.7      0.35      0.18     140.0      0.01
+$# sigma12   sigma13   sigma21   sigma23   sigma31   sigma32       
+
+$#                     sigma11   sigma22   sigma33  
+                          0.17      0.08      0.08
+
+$#    aopt        xp        yp        zp        a1        a2        a3      macf
+         2                                     0.0       0.0       1.0         1
+$#      v1        v2        v3        d1        d2        d3
+                                     0.0      -1.0       0.0
+"""
+
+            new_lines.append(new_block)
+
+            # skip the old block until the next *EM_MAT_ block or end of file
+            i += 1
+            while i < n and not lines[i].strip().startswith("*EM_MAT_") and not lines[i].strip().startswith("$$"):
+                i += 1
+            continue
+
+        new_lines.append(line)
+        i += 1
+
+    # write the modified material.k
+    with open(material_file, "w") as f:
+        f.writelines(new_lines)
+
+    print("✅ All targeted blocks have been successfully replaced, other blocks are preserved.")
+    return True
+
+
+# Replace the material blocks in material.k with mat005
+replace_mat_blocks_preserve_titles(str(path_to_mat))
+
+
+
+# reduce the duration of the simulation (his_top stimulation means shorter simulation)
+set_endtim_in_main(str(path_to_main), 800.0)
+
+
+if ventricle_simulation_only == True :
+    #############################################################
+    # No activation of the atria
+    # Set the conduction velocity of the sa_av, mid_sa_av and post_sa_av to 0
+    ##############################################################
+
+    # reduce the duration of the simulation (his_top stimulation means shorter simulation)
+    set_endtim_in_main(str(path_to_main), 500.0)
+
+    # Set the stimulation to the his_top nodes
+    update_stim_nodes(k_files_directory)
+    
+    modify_part_variable(
+        file_path=str(path_to_beam),
+        part_name = "san_to_avn", 
+        variable_name = "sigma", 
+        new_value=0.000001
+    )
+
+    modify_part_variable(
+        file_path=str(path_to_beam),
+        part_name = "MID_SAN_to_AVN", 
+        variable_name = "sigma", 
+        new_value=0.000001
+    )
+
+    modify_part_variable(
+        file_path=str(path_to_beam),
+        part_name = "POST_SAN_to_AVN", 
+        variable_name = "sigma", 
+        new_value=0.000001
+    )
+
+
+
+
+###########################################################
+# Set the conduction velocity of the lbb and rbb
+###########################################################
+
+modify_part_variable(
+    file_path= str(path_to_beam),
+    part_name = "right bundle branch", 
+    variable_name = "sigma", 
+    new_value= 1.786
+)
+
+modify_part_variable(
+    file_path= str(path_to_beam),
+    part_name = "left bundle branch", 
+    variable_name = "sigma", 
+    new_value= 1.786
+)
+
+
+###########################################################
+# Set the conduction velocity of the purkinjes
+###########################################################
+modify_part_variable(
+    file_path= str(path_to_beam),
+    part_name = "left-purkinje", 
+    variable_name = "sigma", 
+    new_value= 3
+)
+
+modify_part_variable(
+    file_path= str(path_to_beam),
+    part_name = "right-purkinje", 
+    variable_name = "sigma", 
+    new_value= 3
+)
+
+
+
+
+###########################################################
+# Rotate heart 
+###########################################################
+
+
+import cadquery as cq
+import re
+from typing import Optional
+from shutil import copyfile
+
+
+
+def fmt_coord(value: float) -> str:
+    """
+    Returns a coordinate formatted to EXACTLY 9 characters,
+    truncating decimals if necessary.
+    The - sign counts as one of the 9 characters.
+    No rounding: direct truncation.
+    """
+    s = f"{value}"
+
+    # If already <= 9 characters → pad right
+    if len(s) <= 9:
+        return s.rjust(9)
+
+    # If too long → truncate correctly
+    if "." in s:
+        before, after = s.split(".")
+
+        # Max number of possible decimals
+        max_after = 9 - len(before) - 1  # -1 for the point
+
+        if max_after <= 0:
+            # Extreme case: integer too long → cut
+            return s[:9]
+
+        truncated = before + "." + after[:max_after]
+        return truncated.rjust(9)
+    else:
+        # Extreme case: integer too long
+        return s[:9]
+
+
+def update_em_point_set_strict(ep_settings_path: str,
+                               new_coords: np.ndarray,
+                               output_path: str = None,
+                               start_pid: int = 0,
+                               make_backup: bool = True):
+    """
+    Updates ONLY the electrode lines of the *EM_POINT_SET block,
+    keeping everything else strictly unchanged.
+    Coordinates are formatted to 9 characters (including sign).
+    """
+    ep_path = Path(ep_settings_path)
+    if output_path is None:
+        output_path = ep_settings_path
+
+    if make_backup:
+        copyfile(ep_settings_path, ep_settings_path + ".bak")
+
+    with open(ep_settings_path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+
+    # --- search for *EM_POINT_SET keyword ---
+    start_block = None
+    for i, line in enumerate(lines):
+        if line.strip().upper() == "*EM_POINT_SET":
+            start_block = i
+            break
+    if start_block is None:
+        raise RuntimeError("Bloc *EM_POINT_SET introuvable.")
+
+    # search for the header line contaning the pid
+    pid_header = "$#     pid         x         y         z       pos"
+    pid_header_idx = None
+    for j in range(start_block, len(lines)):
+        if lines[j].strip() == pid_header:
+            pid_header_idx = j
+            break
+
+    if pid_header_idx is None:
+        raise RuntimeError("En-tête pid/x/y/z/pos introuvable.")
+
+
+    coord_start = pid_header_idx + 1
+
+    coord_end = coord_start
+    while coord_end < len(lines) and not lines[coord_end].lstrip().startswith("*"):
+        coord_end += 1
+
+    # new lines of electrodes
+    new_coord_lines = []
+    pid = start_pid
+
+    for (x, y, z) in new_coords:
+        line = (
+            f"{pid:10d}"
+            f"{fmt_coord(x):>10}"
+            f"{fmt_coord(y):>10}"
+            f"{fmt_coord(z):>10}\n"
+        )
+        new_coord_lines.append(line)
+        pid += 1
+
+    # write the updated file
+    updated = []
+    updated.extend(lines[:coord_start])       # everything before the coordinates
+    updated.extend(new_coord_lines)          # new coordinates
+    updated.extend(lines[coord_end:])        # everything after
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.writelines(updated)
+
+    print(f"✔ File written: {output_path}")
+    if make_backup:
+        print(f"✔ Backup created: {ep_settings_path}.bak")
+
+
+
+
+
+def rotate_electrodes(
+    angle_frontal_plane: int = 0,
+    angle_transversal_plane: int = 0,
+    angle_sagittal_plane: int = 0,
+    angle_apex_tricuspide: int = 0,
+    angle_mitral_tricuspide: int = 0
+):
+    electrodes = np.array([
+        [-24, 1331, 114],
+        [24, 1331, 114],
+        [52, 1299, 125],
+        [81, 1280, 116],
+        [129, 1279, 86],
+        [150, 1294, 46],
+        [-84, 1456, 28],
+        [84, 1456, 28],
+        [-80, 1150, 34],
+        [80, 1150, 34]
+    ])
+
+    Hans_apex = np.array([65, 1265, 72])
+    Hans_mitral = np.array([28,1310,-1.5])
+    Hans_tricuspide = np.array([-10,1305,35])
+    Hans_V_pulm = np.array([25, 1353, 22])
+
+    Rodero_apex = np.array([108,15,12])
+    Rodero_tricuspide = np.array([42,49,47])
+    Rodero_mitral  = np.array([78,78,62])
+    Rodero_V_pulm = np.array([73, 42, 105])
+    Rodero_centroid = np.array([67,53,62])
+
+
+    P_Hans=np.array([Hans_apex, Hans_tricuspide, Hans_mitral,  Hans_V_pulm])
+    P_Model= np.array([Rodero_apex, Rodero_tricuspide, Rodero_mitral, Rodero_V_pulm])
+
+    AR, TR, MR, RP = Rodero_apex, Rodero_tricuspide, Rodero_mitral, Rodero_V_pulm
+
+    #Translation
+    T = P_Model[0] - P_Hans[0]
+    T[1]=T[1]+0
+    P_Hans_T = P_Hans + T
+
+    #R1
+    AH, TH, MH = P_Hans_T[0], P_Hans_T[1], P_Hans_T[2]
+    VT_Hans = TH - AH
+    VT_Model = TR - AR
+    normal_R1 = np.cross(VT_Model, VT_Hans)
+    angle_deg_R1 = np.degrees(-np.arccos(np.dot(VT_Hans, VT_Model) / (np.linalg.norm(VT_Model) * np.linalg.norm(VT_Hans))))
+    axis_R1 = normal_R1 / np.linalg.norm(normal_R1)
+    rot_R1 = R.from_rotvec( np.radians(angle_deg_R1) * axis_R1)
+    P_Hans_R1 = rot_R1.apply(P_Hans_T - AR) + AR
+
+    #R2
+    AH, TH, MH = P_Hans_R1[0], P_Hans_R1[1], P_Hans_R1[2]
+    VM_Hans = MH - TH
+    VM_Model = MR - TR
+    normal_R2 = TH - AH
+    angle_deg_R2 = -np.degrees(np.arccos(np.dot(VM_Hans, VM_Model) / (np.linalg.norm(VM_Hans) * np.linalg.norm(VM_Model))))
+    axis_R2 = normal_R2 / np.linalg.norm(normal_R2)
+    rot_R2 = R.from_rotvec(np.radians(angle_deg_R2) * axis_R2)
+    P_Hans_R2 = rot_R2.apply(P_Hans_R1 - TR) + TR
+
+    AH, TH, MH = P_Hans_R2[0], P_Hans_R2[1], P_Hans_R2[2]
+
+    electrodes_T= electrodes + T
+    electrodes_R1 = rot_R1.apply(electrodes_T - AR) + AR
+    electrodes_R2 = rot_R2.apply(electrodes_R1 - TR) + TR
+
+    # Rotation 1 in the frontal plane (FP) : ZX plane in ls-dyna, rotation around Y axis
+    axis_FP = np.array([0,1,0])  # Y axis
+    rot_FP = R.from_rotvec( np.radians(angle_frontal_plane) * axis_FP)
+    electrodes_FP = rot_FP.apply(electrodes_R2 - Rodero_centroid) + Rodero_centroid
+    print('Rotation in frontal plane')
+    print(electrodes_FP)
+    print('-----')
+
+    # Rotation 2 in the transversal plane (TP) : XY plane in ls-dyna, rotation around Z axis
+    axis_TP = np.array([0,0,1])  # Z axis
+    rot_TP = R.from_rotvec( np.radians(angle_transversal_plane) * axis_TP)
+    electrodes_TP = rot_TP.apply(electrodes_FP - Rodero_centroid) + Rodero_centroid
+    print('Rotation in transversal plane')
+    # print(electrodes_TP)
+    print('-----')
+
+    # Rotation 3 in the sagittal plane (SP) : YZ plane in ls-dyna, rotation around X axis
+    axis_SP = np.array([1,0,0])  # X axis
+    rot_SP = R.from_rotvec( np.radians(angle_sagittal_plane) * axis_SP)
+    electrodes_SP = rot_SP.apply(electrodes_TP - Rodero_centroid) + Rodero_centroid
+    print('Rotation in sagittal plane')
+    # print(electrodes_SP)
+    print('-----')
+
+    # Rotation 4 around the apex-tricuspide axis
+    AT_axis = (TR - AR)/np.linalg.norm(TR - AR)
+    rot_AT = R.from_rotvec( np.radians(angle_apex_tricuspide) * AT_axis)
+    electrodes_AT = rot_AT.apply(electrodes_SP - AR) + AR
+    print('Rotation around apex-tricuspide axis')
+    # print(electrodes_AT)
+    print('-----')
+
+    # Rotation 5 around the mitral-tricuspide axis
+    MT_axis = (MR - TR)/np.linalg.norm(MR - TR)
+    rot_MT = R.from_rotvec( np.radians(angle_mitral_tricuspide) * MT_axis)
+    electrodes_MT = rot_MT.apply(electrodes_AT - MR) + MR
+    print('Rotation around mitral-tricuspide axis')
+    # print(electrodes_MT)
+    print('-----')
+
+    electrodes_rotated = electrodes_MT
+    # private ansys file needed to plot the orientation of the heart inside the torso 
+    '''
+    if plot ==True :
+        workdir2 = Path("D:\\") / "hans" / "1"
+        skin_hans = cq.importers.importStep(str(workdir2 / "skin2.stp"))
+
+        Hans_skin_rotate = (
+            skin_hans
+            .translate((T[0], (T[1]), T[2]))
+            .rotate(tuple(Rodero_apex),tuple(axis_R1 + Rodero_apex), angle_deg_R1)
+            .rotate(tuple(Rodero_tricuspide), tuple(axis_R2 + Rodero_tricuspide), angle_deg_R2)
+            .rotate(tuple(Rodero_centroid),tuple(axis_FP + Rodero_centroid), angle_frontal_plane)
+            .rotate(tuple(Rodero_centroid), tuple(axis_TP + Rodero_centroid), angle_transversal_plane)
+            .rotate(tuple(Rodero_centroid), tuple(axis_SP + Rodero_centroid), angle_sagittal_plane)
+            .rotate(tuple(AR), tuple(AT_axis + AR), angle_apex_tricuspide)
+            .rotate(tuple(MR), tuple(MT_axis + MR), angle_mitral_tricuspide)
+        )
+        print(T)
+
+        cq.exporters.export(Hans_skin_rotate, str(workdir2 / "skin_rotate.stl"))
+        Hans_skin_rotate_vtk = pv.read(str(workdir2 / "skin_rotate.stl"))
+        model_Heart = pv.read(str(workdir2 / "heart_model.vtu"))
+
+        plotter = pv.Plotter()
+        plotter.add_mesh(model_Heart, color='red', show_edges=False)
+        plotter.add_mesh(Hans_skin_rotate_vtk, color='green', show_edges=False, opacity = 0.2)
+        point_cloud_2 = pv.PolyData(electrodes_rotated)
+        plotter.add_mesh(point_cloud_2, color='red', point_size=10, render_points_as_spheres=True)
+        plotter.show()
+    '''
+    return electrodes_rotated
+
+
+path_to_ep_settings = k_files_directory/"ep_settings.k"
+
+rotated_electrodes = rotate_electrodes(angle_frontal_plane=0, angle_transversal_plane=15, angle_sagittal_plane=0, angle_apex_tricuspide=0, angle_mitral_tricuspide=10)
+update_em_point_set_strict(ep_settings_path=str(path_to_ep_settings),new_coords=rotated_electrodes)

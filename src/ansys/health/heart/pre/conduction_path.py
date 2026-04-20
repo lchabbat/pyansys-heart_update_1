@@ -66,6 +66,8 @@ class ConductionPathType(Enum):
     """Left anterior fascicle."""
     LEFT_POSTERIOR_FASCICLE = "Left posterior fascicle"
     """Left posterior fascicle."""
+    LEFT_BONUS_FASCICLE = "Left bonus fascicle"
+    """Left bonus fascicle"""
     USER_PAHT_1 = "User path 1"
     """User path 1."""
     USER_PAHT_2 = "User path 2"

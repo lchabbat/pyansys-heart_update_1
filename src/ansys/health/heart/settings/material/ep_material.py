@@ -26,15 +26,13 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from ansys.health.heart.settings.defaults import electrophysiology as ep_defaults
+from pydantic import BaseModel
 
-
-@dataclass
 class CellModel:
     """Abstract class for different cell models."""
 
-    @dataclass
-    class Tentusscher:
-        """Hold data for Tentusscher cell model."""
+    class Tentusscher(BaseModel):
+        """Data for Tentusscher cell model."""
 
         gas_constant: float = 8314.472
         t: float = 310
@@ -83,8 +81,6 @@ class CellModel:
         kbufsf: float = 0.3
         bufss: float = 0.4
         kbufss: float = 0.00025
-        # gas_constant=8314.472,
-        # faraday_constant=96485.3415,
         gks: float = 0.392
         gto: float = 0.294
         v: float = -85.23
@@ -113,35 +109,8 @@ class CellModel:
 
         pass
 
-    @dataclass
-    class TentusscherEndo(Tentusscher):
-        """Hold data for Tentusscher cell model in its endocardium version."""
-
-        gks: float = 0.392
-        gto: float = 0.073
-        v: float = -86.709
-        ki: float = 138.4
-        nai: float = 10.355
-        cai: float = 0.00013
-        cass: float = 0.00036
-        casr: float = 3.715
-        rpri: float = 0.9068
-        xr1: float = 0.00448
-        xr2: float = 0.476
-        xs: float = 0.0087
-        m: float = 0.00155
-        h: float = 0.7573
-        j: float = 0.7225
-        d: float = 3.164e-5
-        f: float = 0.8009
-        f2: float = 0.9778
-        fcass: float = 0.9953
-        s: float = 0.3212
-        r: float = 2.235e-8
-
-    @dataclass
     class TentusscherEpi(Tentusscher):
-        """Hold data for Tentusscher cell model in its epicardium version."""
+        """Data for Tentusscher cell model in its epicardium version."""
 
         gks: float = 0.392
         gto: float = 0.294
@@ -165,31 +134,97 @@ class CellModel:
         s: float = 0.999998
         r: float = 2.42e-8
 
-    @dataclass
-    class TentusscherMid(Tentusscher):
-        """Hold data for Tentusscher cell model in its mid-myocardium version."""
 
-        gks: float = 0.098
+
+    class TentusscherEndo(Tentusscher):
+        """
+        Endocardial model with a reduced gks (0.16). 
+        This value is lower than the TP06 reference and the epicardial base (0.392). 
+        It extends the APD to ensure the endocardium repolarizes after the epicardium, 
+        maintaining a physiological transmural sequence.
+        """
+
+        gks: float = 0.16
+        gto: float = 0.073
+        v: float = -86.709
+        ki: float = 138.4
+        nai: float = 10.355
+        cai: float = 0.00013
+        cass: float = 0.00036
+        casr: float = 3.715
+        rpri: float = 0.9068
+        xr1: float = 0.00448
+        xr2: float = 0.476
+        xs: float = 0.0087
+        m: float = 0.00155
+        h: float = 0.7573
+        j: float = 0.7225
+        d: float = 3.164e-5
+        f: float = 0.8009
+        f2: float = 0.9778
+        fcass: float = 0.9953
+        s: float = 0.3212
+        r: float = 2.235e-8
+
+    class TentusscherAtria(Tentusscher):
+        """
+        Data for the Tentusscher cell model adapted for atrial tissue. 
+        
+        Adapted from the epicardial values with shortened APD via modified gks (0.700) and gcal (0.00002). 
+        This ensures atrial repolarization occurs during the QRS complex.
+        """
+
+        gks: float = 0.700
         gto: float = 0.294
-        v: float = -85.423
-        ki: float = 138.52
-        nai: float = 10.132
-        cai: float = 0.000153
-        cass: float = 0.00042
-        casr: float = 4.272
-        rpri: float = 0.8978
-        xr1: float = 0.0165
-        xr2: float = 0.473
-        xs: float = 0.0174
-        m: float = 0.00165
-        h: float = 0.749
-        j: float = 0.6788
-        d: float = 3.288e-5
-        f: float = 0.7026
-        f2: float = 0.9526
-        fcass: float = 0.9942
+        v: float = -85.23
+        ki: float = 136.89
+        nai: float = 8.604
+        cai: float = 0.000126
+        cass: float = 0.00036
+        casr: float = 3.64
+        rpri: float = 0.9073
+        xr1: float = 0.00621
+        xr2: float = 0.4712
+        xs: float = 0.0095
+        m: float = 0.00172
+        h: float = 0.7444
+        j: float = 0.7045
+        d: float = 3.373e-5
+        f: float = 0.7888
+        f2: float = 0.9755
+        fcass: float = 0.9953
         s: float = 0.999998
-        r: float = 2.347e-8
+        r: float = 2.42e-8
+        gcal: float = 0.00002
+
+    class TentusscherEdit(Tentusscher):
+        """
+        Generic Tentusscher cell model used as a container for custom or 
+        interpolated parameter sets (e.g., transmural gradients or 
+        specific regional properties like the septum).
+        """
+
+        gks: float = 0.062
+        gto: float = 0.073
+        v: float = -86.709
+        ki: float = 138.4
+        nai: float = 10.355
+        cai: float = 0.00013
+        cass: float = 0.00036
+        casr: float = 3.715
+        rpri: float = 0.9068
+        xr1: float = 0.00448
+        xr2: float = 0.476
+        xs: float = 0.0087
+        m: float = 0.00155
+        h: float = 0.7573
+        j: float = 0.7225
+        d: float = 3.164e-5
+        f: float = 0.8009
+        f2: float = 0.9778
+        fcass: float = 0.9953
+        s: float = 0.3212
+        r: float = 2.235e-8
 
 
 @dataclass
